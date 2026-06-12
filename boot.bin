@@ -1,0 +1,279 @@
+#include <M5Unified.h>
+#include <Preferences.h> 
+
+// Масштаб пикселей
+const int SCALE = 2; 
+
+// Сетка Динозавра (16x16)
+const uint16_t dino_raw[16] = {
+  0b0000001111100000,
+  0b0000011111110000,
+  0b0000011101110000, 
+  0b0000011111110000,
+  0b0000011111111100,
+  0b0000011111000000,
+  0b0000011111110000,
+  0b0111111111100000,
+  0b1111111111100000,
+  0b1111111111000000,
+  0b0111111110000000,
+  0b0001111100000000,
+  0b0000111100000000,
+  0b0000100100000000, 
+  0b0000100100000000, 
+  0b0000110110000000
+};
+
+// Сетка Кактуса (16x16)
+const uint16_t cactus_raw[16] = {
+  0b0000011000000000,
+  0b0000111100000000,
+  0b0000111100000000,
+  0b0010111101000000,
+  0b0110111101100000,
+  0b1110111101110000,
+  0b1111111111110000,
+  0b0111111111100000,
+  0b0000111100000000,
+  0b0000111100000000,
+  0b0000111100000000,
+  0b0000111100000000,
+  0b0000111100000000,
+  0b0000111100000000,
+  0b0000111100000000,
+  0b0000011000000000
+};
+
+// Размеры объектов
+const int dinoW = 16 * SCALE;
+const int dinoH = 16 * SCALE;
+const int cactusW = 16 * SCALE;
+const int cactusH = 16 * SCALE;
+
+int screenW, screenH, groundY;
+
+// Физика
+float dinoX = 15; 
+float dinoY, dinoVy;
+bool isJumping = false;
+float gravity = 1.4;       
+float jumpPower = -13.5;   
+
+// Препятствие
+float cactusX;
+float cactusSpeed = 5.5;
+
+// Статистика
+int score = 0;
+int highScore = 0; 
+int batteryLevel = 0;
+bool gameOver = false;
+unsigned long lastBatCheck = 0;
+
+Preferences prefs;
+
+// Прототипы функций
+bool checkPixelCollision();
+void drawSharpSprite(int x, int y, const uint16_t* spriteData, uint16_t color);
+void drawVectorBattery(int x, int y);
+
+void setup() {
+  auto cfg = M5.config();
+  M5.begin(cfg);
+  
+  M5.Display.setRotation(1); 
+  M5.Display.clear();
+  
+  screenW = M5.Display.width();
+  screenH = M5.Display.height();
+  
+  groundY = screenH - 15; 
+  dinoY = groundY - dinoH;
+  cactusX = screenW;
+  
+  batteryLevel = M5.Power.getBatteryLevel();
+
+  // Загрузка рекорда из памяти
+  prefs.begin("dino-game", true);                
+  highScore = prefs.getInt("highscore", 0);      
+  prefs.end();                                   
+}
+
+void loop() {
+  M5.update();
+
+  if (millis() - lastBatCheck > 10000) {
+    batteryLevel = M5.Power.getBatteryLevel();
+    lastBatCheck = millis();
+  }
+
+  // --- Экран Game Over ---
+  if (gameOver) {
+    M5.Display.setTextSize(2);
+    M5.Display.setCursor(screenW / 4, screenH / 5);
+    M5.Display.setTextColor(TFT_RED);
+    M5.Display.print("GAME OVER");
+    
+    M5.Display.setTextSize(2); // Крупный текст результатов
+    M5.Display.setTextColor(TFT_WHITE);
+    M5.Display.setCursor(screenW / 5, (screenH / 5) + 25);
+    M5.Display.printf("Score: %d", score);
+    M5.Display.setCursor(screenW / 5, (screenH / 5) + 50);
+    M5.Display.setTextColor(TFT_YELLOW);
+    M5.Display.printf("Record: %d", highScore);
+    
+    if (M5.BtnA.wasPressed()) {
+      gameOver = false;
+      dinoY = groundY - dinoH;
+      cactusX = screenW;
+      score = 0;
+      cactusSpeed = 5.5;
+      M5.Display.clear();
+    }
+    delay(50);
+    return;
+  }
+
+  // --- Очистка экрана (старые позиции) ---
+  M5.Display.fillRect(dinoX, (int)dinoY, dinoW, dinoH, TFT_BLACK); 
+  M5.Display.fillRect((int)cactusX, groundY - cactusH, cactusW, cactusH, TFT_BLACK);
+  
+  // --- Физика прыжка ---
+  if (M5.BtnA.wasPressed() && !isJumping) {
+    dinoVy = jumpPower;
+    isJumping = true;
+  }
+  
+  dinoVy += gravity;
+  dinoY += dinoVy;
+  
+  if (dinoY >= groundY - dinoH) {
+    dinoY = groundY - dinoH;
+    dinoVy = 0;
+    isJumping = false;
+  }
+
+  // --- Движение кактуса ---
+  cactusX -= cactusSpeed;
+  if (cactusX < -cactusW) {
+    cactusX = screenW;
+    score++;
+    if (score % 5 == 0) cactusSpeed += 0.6; 
+  }
+
+  // --- ПОПИКСЕЛЬНАЯ ПРОВЕРКА СТОЛКНОВЕНИЯ ---
+  if (checkPixelCollision()) {
+    gameOver = true;
+    
+    if (score > highScore) {
+      highScore = score;
+      prefs.begin("dino-game", false);           
+      prefs.putInt("highscore", highScore);      
+      prefs.end();                               
+    }
+  }
+
+  // --- ОТРИСОВКА ГРАФИКИ ---
+  M5.Display.drawLine(0, groundY, screenW, groundY, TFT_WHITE);
+
+  // Рисуем ПИКСЕЛЬНОГО Дино (Зеленый)
+  drawSharpSprite(dinoX, (int)dinoY, dino_raw, TFT_GREEN);
+  
+  // Рисуем ПИКСЕЛЬНЫЙ Кактус (Красный)
+  drawSharpSprite((int)cactusX, groundY - cactusH, cactus_raw, TFT_RED);
+  
+  // === ИСПРАВЛЕННЫЙ ИНТЕРФЕЙС СЧЕТА И РЕКОРДА ===
+  M5.Display.setTextSize(2); // Крупный шрифт для читаемости
+  int scoreAreaWidth = 145;  // Достаточная ширина, чтобы ничего не обрезалось
+  
+  // Стираем только зону счета
+  M5.Display.fillRect(screenW - scoreAreaWidth - 5, 2, scoreAreaWidth, 18, TFT_BLACK);
+  
+  // Выводим РЕКОРД (Желтым цветом)
+  M5.Display.setCursor(screenW - scoreAreaWidth, 2);
+  M5.Display.setTextColor(TFT_YELLOW);
+  M5.Display.printf("HI %03d", highScore);
+  
+  // Выводим ТЕКУЩИЙ СЧЕТ (Белым цветом чуть правее)
+  M5.Display.setCursor(screenW - 65, 2);
+  M5.Display.setTextColor(TFT_WHITE);
+  M5.Display.printf("%03d", score);
+
+  // Отрисовка четкой батареи и процентов
+  drawVectorBattery(6, 6);
+
+  delay(25); 
+}
+
+// Рендеринг пикселей
+void drawSharpSprite(int x, int y, const uint16_t* spriteData, uint16_t color) {
+  for (int row = 0; row < 16; row++) {
+    uint16_t rowData = spriteData[row];
+    for (int col = 0; col < 16; col++) {
+      if ((rowData >> (15 - col)) & 1) {
+        M5.Display.fillRect(x + (col * SCALE), y + (row * SCALE), SCALE, SCALE, color);
+      }
+    }
+  }
+}
+
+// Умный алгоритм Pixel-Perfect Collision
+bool checkPixelCollision() {
+  int x1 = dinoX;
+  int y1 = (int)dinoY;
+  int x2 = (int)cactusX;
+  int y2 = groundY - cactusH;
+
+  int overlapXStart = max(x1, x2);
+  int overlapXEnd = min(x1 + dinoW, x2 + cactusW);
+  int overlapYStart = max(y1, y2);
+  int overlapYEnd = min(y1 + dinoH, y2 + cactusH);
+
+  if (overlapXStart >= overlapXEnd || overlapYStart >= overlapYEnd) {
+    return false;
+  }
+
+  for (int screenY = overlapYStart; screenY < overlapYEnd; screenY += SCALE) {
+    for (int screenX = overlapXStart; screenX < overlapXEnd; screenX += SCALE) {
+      
+      int dinoCol = (screenX - x1) / SCALE;
+      int dinoRow = (screenY - y1) / SCALE;
+
+      int cactusCol = (screenX - x2) / SCALE;
+      int cactusRow = (screenY - y2) / SCALE;
+
+      bool dinoBit = (dino_raw[dinoRow] >> (15 - dinoCol)) & 1;
+      bool cactusBit = (cactus_raw[cactusRow] >> (15 - cactusCol)) & 1;
+
+      if (dinoBit && cactusBit) {
+        return true; 
+      }
+    }
+  }
+  return false;
+}
+
+// Векторная батарейка + текст с процентами
+void drawVectorBattery(int x, int y) {
+  int batWidth = 20;
+  int batHeight = 10;
+  
+  M5.Display.fillRect(x, y, batWidth + 45, batHeight + 2, TFT_BLACK);
+  
+  uint16_t color = TFT_GREEN;
+  if (batteryLevel <= 20) color = TFT_RED;
+  else if (batteryLevel <= 50) color = TFT_YELLOW;
+
+  M5.Display.drawRect(x, y, batWidth, batHeight, TFT_WHITE);
+  M5.Display.fillRect(x + batWidth, y + 2, 2, 6, TFT_WHITE); 
+
+  int fillWidth = map(batteryLevel, 0, 100, 0, batWidth - 4);
+  if (fillWidth > 0) {
+    M5.Display.fillRect(x + 2, y + 2, fillWidth, batHeight - 4, color);
+  }
+
+  M5.Display.setTextSize(1); 
+  M5.Display.setTextColor(TFT_WHITE);
+  M5.Display.setCursor(x + batWidth + 8, y + 1);
+  M5.Display.printf("%d%%", batteryLevel);
+}
